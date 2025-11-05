@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Gestor de pestañas — tags coloreados + YouTube + títulos</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --muted:#666;
+    --card-border:#eee;
+    --accent:#0b84ff;
+  }
+  body{font-family:system-ui,Arial;margin:18px;max-width:980px;background:var(--bg);color:#111}
+  h2{margin:0 0 8px}
+  textarea{width:100%;height:120px;font-family:monospace;padding:8px;border-radius:8px;border:1px solid #ddd}
+  .controls{margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  button{padding:.45rem .7rem;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}
+  button.primary{background:var(--accent);color:#fff;border-color:transparent}
+  input[type="text"].small{padding:.28rem .5rem;border-radius:6px;border:1px solid #ccc}
+  #links{margin-top:12px;border-radius:8px;overflow:hidden;border:1px solid var(--card-border)}
+  .row{display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--card-border);background:#fff}
+  .row:last-child{border-bottom:0}
+  .favicon{width:18px;height:18px;flex-shrink:0}
+  .title{flex:1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:2px}
+  .timestamp{width:90px;font-size:0.85rem;color:var(--muted);text-align:center;flex-shrink:0}
+  .tags-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;max-width:260px}
+  .tag-bubble{padding:4px 8px;border-radius:999px;font-size:0.85rem;color:#fff;display:inline-flex;gap:6px;align-items:center}
+  .tag-bubble .remove-tag{cursor:pointer;margin-left:4px;font-weight:bold}
+  .tag-edit{width:180px;padding:4px;border-radius:6px;border:1px solid #ccc}
+  .row .actions{display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0}
+  .muted{color:var(--muted);font-size:.95rem}
+  .archived-panel{margin-top:12px;padding:8px;border:1px dashed #ccc;background:#fafafa;display:none}
+  .hidden-note{font-size:.9rem;color:var(--muted);margin:6px 0}
+  /* drag visual */
+  .row.dragging{opacity:0.5;background:#f8faff}
+</style>
+</head>
+<body>
+<h2>Gestor de pestañas — tags coloreados + YouTube + títulos</h2>
+<p class="muted">Pegá URLs en el cuadro (una por línea). Al presionar <strong>Procesar</strong> se agregarán con timestamp y tags (separados por coma).</p>
+
+<textarea id="txt" placeholder="https://ejemplo.com"></textarea>
+
+<div class="controls">
+  <button id="procesar">Procesar</button>
+  <button id="abrir" class="primary">Abrir páginas (marcadas)</button>
+  <button id="archivar">Archivar/ocultar marcadas</button>
+  <button id="mostrarOcultas">Mostrar ocultas</button>
+  <button id="ordenarAZ">Ordenar A-Z</button>
+  <button id="ordenFecha">Ordenar por fecha</button>
+  <input id="tagFiltro" class="small" type="text" placeholder="Filtrar por tag..." />
+  <button id="exportar">Exportar .txt</button>
+  <div style="margin-left:auto" class="muted" id="stats">total: 0 / visibles: 0 / marcadas: 0</div>
+</div>
+
+<div id="links" aria-live="polite"></div>
+
+<div class="archived-panel" id="archivedPanel">
+  <strong>Archivadas</strong>
+  <div id="archivedList"></div>
+  <div style="margin-top:8px"><button id="ocultarPanel">Cerrar</button></div>
+</div>
+
+<script>
+/* Parte 1: utilidades y configuración */
+(async function(){
+const STORAGE_KEY = 'bookmarks_data_v2';
+const txt = document.getElementById('txt');
+const cont = document.getElementById('links');
+const stats = document.getElementById('stats');
+const archivedPanel = document.getElementById('archivedPanel');
+const archivedList = document.getElementById('archivedList');
+const tagFiltro = document.getElementById('tagFiltro');
+/* YouTube API key: ponela antes de cargar el HTML o en la consola:
+   window.YT_API_KEY = 'AIza...'; */
+window.YT_API_KEY = 'AIzaSyBDEzDGmxVnP3QEFmbekY68yj9MNaTqtf8'; // global
+const YT_API_KEY = window.YT_API_KEY; // referencia corta local
+
+
+/* UTILIDADES */
+function loadData(){ try{ const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : []; }catch(e){ return []; } }
+function saveData(arr){ localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }
+function normalizeUrl(u){ u=(u||'').trim(); if(!u) return ''; if(!/^https?:\/\//i.test(u)) u='https://'+u; return u; }
+function getDomain(u){ try{ return new URL(u).hostname; }catch(e){ return u; } }
+function nowISO(){ return new Date().toISOString(); } // malleable timestamp storage
+function formatDateISO(iso){ try{ const d=new Date(iso); return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}` }catch(e){ return '' } }
+
+/* TAG utilities:
+   - parse input string (comma separated) -> normalized tags array with leading #
+   - color hash from tag text
+*/
+function parseTags(text){
+  if(!text) return [];
+  return text.split(',').map(t=>t.trim()).filter(Boolean).map(t=>{
+    if(!t.startsWith('#')) t = '#'+t;
+    return t.toLowerCase();
+  });
+}
+function tagsToString(tagsArr){ return (tagsArr||[]).join(', '); }
+function hashStringToColor(str){
+  // simple deterministic pastel color
+  let h=0; for(let i=0;i<str.length;i++){ h = str.charCodeAt(i) + ((h<<5)-h); h = h & h; }
+  const hue = Math.abs(h) % 360;
+  // return HSL with moderate saturation/lightness
+  return `hsl(${hue}deg 70% 45%)`;
+}
+
+/* Title fetching:
+   - YouTube: use YT API if available
+   - Others: use jsonlink.io api: https://jsonlink.io/api/extract?url=...
+     (incremental, per-url, non-blocking)
+*/
+async function fetchTitleForUrl(url) {
+  // --- YOUTUBE ---
+  if (url.includes("youtube.com") || url.includes("youtu.be")) {
+    try {
+      let ytApi = "https://noembed.com/embed?url=" + encodeURIComponent(url);
+      let r = await fetch(ytApi);
+      if (!r.ok) throw new Error();
+      let j = await r.json();
+      if (j.title) return j.title;
+    } catch (e) { }
+  }
+
+  // --- OTHER SITES via allorigins ---
+  try {
+    const api2 = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+    const r2 = await fetch(api2);
+    if(!r2.ok) throw new Error('allorigins');
+    const j2 = await r2.json();
+    let html = j2.contents || '';
+    let match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (match && match[1]) return match[1].trim();
+  } catch(e) {}
+
+  // fallback = dominio
+  try {
+    return (new URL(url)).hostname.replace("www.","");
+  } catch(e) {
+    return url;
+  }
+}
+
+
+/* small helper: ensure each stored object has fields:
+   { url, archived(bool), tags:[], title|null, created (ISO string) }
+*/
+function normalizeRecord(rec){
+  return {
+    url: rec.url,
+    archived: !!rec.archived,
+    tags: Array.isArray(rec.tags) ? rec.tags : parseTags(rec.tags || ''),
+    title: rec.title || null,
+    created: rec.created || rec.timestamp || (rec.createdISO ? rec.createdISO : nowISO())
+  };
+}
+/* Parte 2: renderizado, handlers, orden, archivado, drag/drop, export */
+
+// RENDER (incremental: pinta la fila y luego actualiza título cuando llega)
+async function render(){
+  const all = loadData().map(normalizeRecord);
+  saveData(all); // normalize storage
+  const filtro = (tagFiltro.value||'').toLowerCase();
+  cont.innerHTML = '';
+  let visibles = 0;
+  for(let idx=0; idx<all.length; idx++){
+    const it = all[idx];
+    if(it.archived) continue;
+    // filtro: si filtro tiene texto, mostrar si ANY tag contiene substring
+    if(filtro){
+      const match = (it.tags||[]).some(t=>t.toLowerCase().includes(filtro));
+      if(!match) continue;
+    }
+    visibles++;
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.dataset.index = idx;
+    row.draggable = true;
+
+    // checkbox
+    const chk = document.createElement('input'); chk.type='checkbox';
+    row.appendChild(chk);
+
+    // favicon
+    const fav = document.createElement('img'); fav.className='favicon';
+    fav.src = 'https://www.google.com/s2/favicons?domain=' + getDomain(it.url);
+    fav.alt = '';
+    row.appendChild(fav);
+
+    // title (text) clickable (copies real url to clipboard)
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'title';
+    titleSpan.textContent = it.title || it.url;
+    titleSpan.title = it.url;
+    titleSpan.addEventListener('click', ()=>{ navigator.clipboard.writeText(it.url); alert('URL copiada al portapapeles'); });
+    row.appendChild(titleSpan);
+
+    // timestamp (formatted dd/mm/yyyy)
+    const ts = document.createElement('div');
+    ts.className = 'timestamp';
+    ts.textContent = formatDateISO(it.created);
+    row.appendChild(ts);
+
+    // tags visual area
+    const tagsWrap = document.createElement('div'); tagsWrap.className = 'tags-wrap';
+    // render bubbles for each tag
+    (it.tags||[]).forEach(t=>{
+      const bubble = document.createElement('span'); bubble.className='tag-bubble';
+      const color = hashStringToColor(t);
+      bubble.style.background = color;
+      bubble.textContent = t;
+      // small x to remove tag
+      const x = document.createElement('span'); x.className='remove-tag'; x.textContent='✕';
+      x.title = 'Eliminar tag';
+      x.addEventListener('click', (ev)=>{
+        ev.stopPropagation();
+        const arr = loadData();
+        const rec = normalizeRecord(arr[idx]);
+        rec.tags = (rec.tags||[]).filter(tt=>tt!==t);
+        arr[idx] = rec;
+        saveData(arr); render();
+      });
+      bubble.appendChild(x);
+      tagsWrap.appendChild(bubble);
+    });
+
+    // small editable input to add/edit tags for this record
+    const tagInput = document.createElement('input');
+    tagInput.type='text';
+    tagInput.placeholder = '#tag1,#tag2';
+    tagInput.className = 'tag-edit';
+    tagInput.value = tagsToString(it.tags||[]);
+    tagInput.addEventListener('blur', ()=>{
+      const arr = loadData();
+      const rec = normalizeRecord(arr[idx]);
+      rec.tags = parseTags(tagInput.value);
+      arr[idx] = rec;
+      saveData(arr);
+      render();
+    });
+    tagsWrap.appendChild(tagInput);
+    row.appendChild(tagsWrap);
+
+    // actions: delete, archive/restore handled elsewhere
+    const actions = document.createElement('div'); actions.className='actions';
+    const del = document.createElement('button'); del.textContent='X'; del.title='Eliminar registro';
+    del.addEventListener('click', ()=>{
+      const arr = loadData(); arr.splice(idx,1); saveData(arr); render();
+    });
+    actions.appendChild(del);
+    row.appendChild(actions);
+
+    cont.appendChild(row);
+
+    // incremental title fetch (not blocking render)
+    (async ()=>{
+      if(!it.title){
+        const t = await fetchTitleForUrl(it.url);
+        if(t){
+          const arr = loadData();
+          // find index of same url (since array may have been reordered); prefer exact match
+          const pos = arr.findIndex(r=>r.url === it.url);
+          if(pos >= 0){
+            arr[pos].title = t;
+            saveData(arr);
+            // update only the DOM titleSpan if still present for same url
+            // find row with same url and update
+            const rows = cont.querySelectorAll('.row');
+            for(const r of rows){
+              const i = Number(r.dataset.index);
+              const rec = normalizeRecord(loadData()[i] || {});
+              if(rec.url === it.url){
+                const tsTitle = r.querySelector('.title');
+                if(tsTitle) tsTitle.textContent = t;
+              }
+            }
+          }
+        }
+      }
+    })();
+
+    // drag visuals and handlers (set in global drag handlers too)
+    row.addEventListener('dragstart', (e)=>{ row.classList.add('dragging'); e.dataTransfer.setData('text/plain', idx); });
+    row.addEventListener('dragend', ()=>{ row.classList.remove('dragging'); });
+  } // end for
+
+  updateStats(loadData().length, visibles);
+}
+
+// update stats
+function updateStats(total, visibles){
+  const checked = cont.querySelectorAll('.row input[type=checkbox]:checked').length;
+  stats.textContent = `total: ${total} / visibles: ${visibles} / marcadas: ${checked}`;
+}
+
+/* HANDLERS */
+
+// procesar
+document.getElementById('procesar').addEventListener('click', ()=>{
+  const lines = txt.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(!lines.length) return;
+  const arr = loadData();
+  const now = nowISO();
+  for(const l of lines){
+    const u = normalizeUrl(l);
+    if(!u) continue;
+    if(!arr.some(x=>x.url === u)){
+      arr.push({ url: u, archived: false, tags: [], title: null, created: now });
+    }
+  }
+  saveData(arr);
+  txt.value = '';
+  render();
+});
+
+// abrir marcadas
+document.getElementById('abrir').addEventListener('click', ()=>{
+  const rows = [...cont.querySelectorAll('.row')];
+  const urls = rows.filter(r=>r.querySelector('input[type=checkbox]').checked)
+                   .map(r=> loadData()[Number(r.dataset.index)].url )
+                   .filter(Boolean);
+  if(!urls.length) return;
+  const host = window.open('', '_blank');
+  host.document.write('<!doctype html><meta charset="utf-8"><title>Opening...</title><script>const urls='+JSON.stringify(urls)+'; for(const u of urls){ window.open(u,"_blank"); }<\/script>');
+});
+
+// archivar marcadas
+document.getElementById('archivar').addEventListener('click', ()=>{
+  const arr = loadData();
+  [...cont.querySelectorAll('.row')].forEach(r=>{
+    const chk = r.querySelector('input[type=checkbox]');
+    if(chk && chk.checked){
+      const idx = Number(r.dataset.index);
+      if(!isNaN(idx) && arr[idx]) arr[idx].archived = true;
+    }
+  });
+  saveData(arr); render();
+});
+
+// mostrar ocultas panel
+document.getElementById('mostrarOcultas').addEventListener('click', ()=>{
+  const arr = loadData();
+  const hidden = arr.map((it,i)=>({...normalizeRecord(it), i})).filter(x=>x.archived);
+  archivedList.innerHTML = '';
+  if(!hidden.length) archivedList.textContent = 'No hay elementos archivados.';
+  else hidden.forEach(h=>{
+    const div = document.createElement('div');
+    div.style.display='flex'; div.style.gap='8px'; div.style.alignItems='center'; div.style.padding='6px 0';
+    const s = document.createElement('span'); s.style.flex='1'; s.textContent = h.title || h.url;
+    const restore = document.createElement('button'); restore.textContent='Restaurar';
+    restore.addEventListener('click', ()=>{
+      const arr2 = loadData(); if(arr2[h.i]) arr2[h.i].archived = false; saveData(arr2); render(); document.getElementById('mostrarOcultas').click();
+    });
+    const del = document.createElement('button'); del.textContent='Eliminar';
+    del.addEventListener('click', ()=>{
+      const arr3 = loadData(); arr3.splice(h.i,1); saveData(arr3); render(); document.getElementById('mostrarOcultas').click();
+    });
+    div.appendChild(s); div.appendChild(restore); div.appendChild(del);
+    archivedList.appendChild(div);
+  });
+  archivedPanel.style.display='block';
+});
+document.getElementById('ocultarPanel').addEventListener('click', ()=>{ archivedPanel.style.display='none'; });
+
+// ordenar A-Z
+document.getElementById('ordenarAZ').addEventListener('click', ()=>{
+  const arr = loadData();
+  arr.sort((a,b)=> ( (a.title||a.url).toString().localeCompare((b.title||b.url).toString()) ));
+  saveData(arr); render();
+});
+
+// ordenar por fecha (más reciente primero)
+document.getElementById('ordenFecha').addEventListener('click', ()=>{
+  const arr = loadData();
+  arr.sort((a,b)=> new Date(b.created) - new Date(a.created));
+  saveData(arr); render();
+});
+
+// filtro tags en tiempo real
+tagFiltro.addEventListener('input', render);
+
+// export
+document.getElementById('exportar').addEventListener('click', ()=>{
+  const arr = loadData();
+  const text = arr.map(r=> `${r.created}\t${(r.title||r.url)}\t${r.url}\t${(Array.isArray(r.tags)?r.tags.join(', '):r.tags||'')}${r.archived?'\t[ARCHIVED]':''}` ).join('\n');
+  const blob = new Blob([text],{type:'text/plain'}); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download='bookmarks_backup.txt'; a.click(); URL.revokeObjectURL(a.href);
+});
+
+/* DRAG & DROP: reorder and save */
+let dragIndex = null;
+cont.addEventListener('dragstart', (e)=>{
+  const row = e.target.closest('.row');
+  if(!row) return;
+  row.classList.add('dragging');
+  dragIndex = Number(row.dataset.index);
+  e.dataTransfer.effectAllowed = 'move';
+});
+cont.addEventListener('dragover', (e)=>{ e.preventDefault(); });
+cont.addEventListener('drop', (e)=>{
+  e.preventDefault();
+  const target = e.target.closest('.row');
+  if(!target || dragIndex === null) return;
+  const toIndex = Number(target.dataset.index);
+  if(dragIndex === toIndex) { dragIndex = null; document.querySelectorAll('.row.dragging').forEach(r=>r.classList.remove('dragging')); return; }
+  const arr = loadData();
+  const [moved] = arr.splice(dragIndex,1);
+  arr.splice(toIndex,0,moved);
+  saveData(arr);
+  dragIndex = null;
+  document.querySelectorAll('.row.dragging').forEach(r=>r.classList.remove('dragging'));
+  render();
+});
+
+/* INITIALIZE */
+render();
+
+})(); // end IIFE
+</script>
+</body>
+</html>
