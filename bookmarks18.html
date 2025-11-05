@@ -110,37 +110,36 @@ function hashStringToColor(str){
    - Others: use jsonlink.io api: https://jsonlink.io/api/extract?url=...
      (incremental, per-url, non-blocking)
 */
-async function fetchTitleForUrl(url){
-  try{
-    const domain = getDomain(url).toLowerCase();
-    // youtube
-    if((domain.includes('youtube.com') || domain.includes('youtu.be')) && window.YT_API_KEY){
-      let vid = null;
-      const m = url.match(/[?&]v=([^&]+)/);
-      if(m) vid = m[1]; else {
-        const m2 = url.match(/youtu\.be\/([^?&/]+)/);
-        if(m2) vid = m2[1];
-      }
-      if(vid){
-        const api = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${encodeURIComponent(vid)}&key=${encodeURIComponent(window.YT_API_KEY)}`;
-        const r = await fetch(api);
-        if(!r.ok) throw new Error('YT API '+r.status);
-        const j = await r.json();
-        return j.items?.[0]?.snippet?.title || getDomain(url);
-      }
-      return getDomain(url);
-    }
-    // fallback jsonlink
-    const api2 = 'https://jsonlink.io/api/extract?url=' + encodeURIComponent(url);
+async function fetchTitleForUrl(url) {
+  // --- YOUTUBE ---
+  if (url.includes("youtube.com") || url.includes("youtu.be")) {
+    try {
+      let ytApi = "https://noembed.com/embed?url=" + encodeURIComponent(url);
+      let r = await fetch(ytApi);
+      if (!r.ok) throw new Error();
+      let j = await r.json();
+      if (j.title) return j.title;
+    } catch (e) { }
+  }
+
+  // --- OTHER SITES via allorigins ---
+  try {
+    const api2 = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
     const r2 = await fetch(api2);
-    if(!r2.ok) throw new Error('jsonlink '+r2.status);
+    if(!r2.ok) throw new Error('allorigins');
     const j2 = await r2.json();
-    return j2.title || getDomain(url);
-  }catch(e){
-    return getDomain(url);
+    let html = j2.contents || '';
+    let match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (match && match[1]) return match[1].trim();
+  } catch(e) {}
+
+  // fallback = dominio
+  try {
+    return (new URL(url)).hostname.replace("www.","");
+  } catch(e) {
+    return url;
   }
 }
-
 
 
 /* small helper: ensure each stored object has fields:
