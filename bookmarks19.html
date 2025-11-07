@@ -33,6 +33,29 @@
   .hidden-note{font-size:.9rem;color:var(--muted);margin:6px 0}
   /* drag visual */
   .row.dragging{opacity:0.5;background:#f8faff}
+
+  /* TAG CLOUD (mini M1) */
+  #tagCloud { display:flex; gap:6px; align-items:center; margin-left:6px; }
+  .cloud-bubble {
+    font-size:0.70rem;           /* M1 */
+    padding:2px 6px;             /* M1 */
+    border-radius:999px;
+    color:#fff;
+    cursor:pointer;
+    opacity:0.95;
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    user-select:none;
+    border: 1px solid rgba(0,0,0,0.06);
+  }
+  .cloud-bubble.active {
+    box-shadow: 0 0 0 3px rgba(11,132,255,0.12);
+    transform: translateY(-1px);
+  }
+
+  /* make sure the controls row fits the cloud nicely */
+  .controls .tag-cloud-wrapper { display:flex; align-items:center; gap:8px; }
 </style>
 </head>
 <body>
@@ -48,7 +71,13 @@
   <button id="mostrarOcultas">Mostrar ocultas</button>
   <button id="ordenarAZ">Ordenar A-Z</button>
   <button id="ordenFecha">Ordenar por fecha</button>
-  <input id="tagFiltro" class="small" type="text" placeholder="Filtrar por tag..." />
+
+  <!-- filtro + nube en la misma línea -->
+  <div class="tag-cloud-wrapper" style="margin-left:6px;">
+    <input id="tagFiltro" class="small" type="text" placeholder="Filtrar por tag..." />
+    <div id="tagCloud" aria-hidden="true"></div>
+  </div>
+
   <button id="exportar">Exportar .txt</button>
   <div style="margin-left:auto" class="muted" id="stats">total: 0 / visibles: 0 / marcadas: 0</div>
 </div>
@@ -71,6 +100,7 @@ const stats = document.getElementById('stats');
 const archivedPanel = document.getElementById('archivedPanel');
 const archivedList = document.getElementById('archivedList');
 const tagFiltro = document.getElementById('tagFiltro');
+const tagCloudEl = document.getElementById('tagCloud');
 /* YouTube API key: ponela antes de cargar el HTML o en la consola:
    window.YT_API_KEY = 'AIza...'; */
 window.YT_API_KEY = 'AIzaSyBDEzDGmxVnP3QEFmbekY68yj9MNaTqtf8'; // global
@@ -107,11 +137,10 @@ function hashStringToColor(str){
 
 /* Title fetching:
    - YouTube: use YT API if available
-   - Others: use jsonlink.io api: https://jsonlink.io/api/extract?url=...
-     (incremental, per-url, non-blocking)
+   - Others: use allorigins -> title extraction
 */
 async function fetchTitleForUrl(url) {
-  // --- YOUTUBE ---
+  // --- YOUTUBE via noembed (safe, no key) ---
   if (url.includes("youtube.com") || url.includes("youtu.be")) {
     try {
       let ytApi = "https://noembed.com/embed?url=" + encodeURIComponent(url);
@@ -122,7 +151,7 @@ async function fetchTitleForUrl(url) {
     } catch (e) { }
   }
 
-  // --- OTHER SITES via allorigins ---
+  // --- OTHER SITES via allorigins (works from GH Pages) ---
   try {
     const api2 = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
     const r2 = await fetch(api2);
@@ -154,12 +183,54 @@ function normalizeRecord(rec){
     created: rec.created || rec.timestamp || (rec.createdISO ? rec.createdISO : nowISO())
   };
 }
+
 /* Parte 2: renderizado, handlers, orden, archivado, drag/drop, export */
 
 // RENDER (incremental: pinta la fila y luego actualiza título cuando llega)
 async function render(){
   const all = loadData().map(normalizeRecord);
   saveData(all); // normalize storage
+
+  // BUILD TAG CLOUD (only show if there are saved bookmarks and at least one tag)
+  const allTags = new Set();
+  all.forEach(it => {
+    if(Array.isArray(it.tags)) it.tags.forEach(t => { if(t) allTags.add(t); });
+  });
+  // Only show when there is at least one bookmark AND at least one tag (B behavior)
+  if(all.length > 0 && allTags.size > 0){
+    tagCloudEl.innerHTML = '';
+    // sort tags alphabetically for predictable order
+    Array.from(allTags).sort((a,b)=>a.localeCompare(b)).forEach(tag => {
+      const bub = document.createElement('span');
+      bub.className = 'cloud-bubble';
+      bub.textContent = tag;
+      bub.style.background = hashStringToColor(tag);
+      // active if current filtro includes this tag (case-insensitive substring match)
+      const filtro = (tagFiltro.value||'').toLowerCase();
+      if(filtro && tag.toLowerCase().includes(filtro)) bub.classList.add('active');
+      bub.addEventListener('click', (ev)=>{
+        ev.stopPropagation();
+        const cur = (tagFiltro.value||'').toLowerCase();
+        if(cur === tag.toLowerCase()){
+          // toggle off
+          tagFiltro.value = '';
+        } else {
+          // set filter to this tag (use exact tag with #)
+          tagFiltro.value = tag;
+        }
+        // trigger input event equivalent
+        render();
+      });
+      tagCloudEl.appendChild(bub);
+    });
+    tagCloudEl.style.display = 'flex';
+    tagCloudEl.setAttribute('aria-hidden','false');
+  } else {
+    tagCloudEl.innerHTML = '';
+    tagCloudEl.style.display = 'none';
+    tagCloudEl.setAttribute('aria-hidden','true');
+  }
+
   const filtro = (tagFiltro.value||'').toLowerCase();
   cont.innerHTML = '';
   let visibles = 0;
@@ -342,17 +413,17 @@ document.getElementById('mostrarOcultas').addEventListener('click', ()=>{
   const arr = loadData();
   const hidden = arr.map((it,i)=>({...normalizeRecord(it), i})).filter(x=>x.archived);
   archivedList.innerHTML = '';
-  if(!hidden.length) archivedList.textContent = 'No hay elementos archivados.';
+  if(!hidden.length) archivedList.textContent = 'No hay elementos archivados.'; 
   else hidden.forEach(h=>{
     const div = document.createElement('div');
     div.style.display='flex'; div.style.gap='8px'; div.style.alignItems='center'; div.style.padding='6px 0';
     const s = document.createElement('span'); s.style.flex='1'; s.textContent = h.title || h.url;
     const restore = document.createElement('button'); restore.textContent='Restaurar';
-    restore.addEventListener('click', ()=>{
+    restore.addEventListener('click', ()=>{ 
       const arr2 = loadData(); if(arr2[h.i]) arr2[h.i].archived = false; saveData(arr2); render(); document.getElementById('mostrarOcultas').click();
     });
     const del = document.createElement('button'); del.textContent='Eliminar';
-    del.addEventListener('click', ()=>{
+    del.addEventListener('click', ()=>{ 
       const arr3 = loadData(); arr3.splice(h.i,1); saveData(arr3); render(); document.getElementById('mostrarOcultas').click();
     });
     div.appendChild(s); div.appendChild(restore); div.appendChild(del);
